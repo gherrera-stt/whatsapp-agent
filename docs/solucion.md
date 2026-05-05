@@ -221,6 +221,34 @@ Meta Cloud API ──webhook POST──▶ Backend Express
 - Latencia objetivo de respuesta del agente: **< 4 s P95** end-to-end.
 - Persistencia obligatoria de cada mensaje entrante antes de responder, para no perder trazabilidad ante fallos.
 
+### 4.6 LLM Operations
+
+Disciplina operativa para que el componente LLM sea construible, depurable y controlable en costo. Implementación concreta en **Slice 8.5 — Endurecimiento LLM**.
+
+**Prompt versioning**
+- Cada prompt vive en `apps/backend/src/prompts/` como módulo TypeScript exportando una función pura que recibe el contexto y devuelve los `messages`/`system` a enviar a Claude.
+- Identificador semántico estable: `<ámbito>.<propósito>.v<n>` — ej. `system.sales.v3`, `tool.consultar_producto.v1`.
+- Cambio de comportamiento = nueva versión; no se sobreescribe la anterior. Git da el historial; el `prompt_id` versionado da trazabilidad en runtime.
+- Cada llamada a Claude registra `prompt_id` y `prompt_version` en la tabla `llm_traces`.
+
+**Eval pipeline**
+- Golden set en `evals/cases.yaml`: 30–50 casos representativos (saludo, cotización ambigua, pedido multi-producto, intento de fraude, escalado, mensaje fuera de dominio).
+- Cada caso define: `input`, `contexto_previo` (turnos anteriores), y `aserciones` (intención esperada, tool esperado, regex sobre la respuesta, criterios libres evaluados con LLM-as-judge usando `claude-haiku-4-5`).
+- Runner `npm run eval` corre el set contra el prompt actual y produce reporte (pass/fail, latencia, costo) comparado contra baseline.
+- Manual antes de mergear cambios de prompt; no bloquea CI inicialmente porque consume API.
+
+**Observabilidad LLM-específica**
+- Tabla `llm_traces` en PostgreSQL con todo lo que importa para depurar una conversación: identificadores (`conversation_id`, `message_id`, `prompt_id`, `prompt_version`), modelo, tokens (`input`, `output`, `cache_read`, `cache_creation`), `latency_ms`, `tools_called` (jsonb), `input` y `output` completos (jsonb), `cost_usd`, `created_at`.
+- Vista en el panel admin con drill-down: conversación → turnos → trace por turno (prompt usado, tools llamados, costo).
+- Sin Langfuse/Helicone en v1; migración a Langfuse cuando el volumen justifique el costo operativo (estimación: > 5k traces/día).
+
+**Cost tracking**
+- Tarifas de `claude-sonnet-4-6` codificadas como constantes (`INPUT_USD_PER_MTOK`, `OUTPUT_USD_PER_MTOK`, `CACHE_READ_USD_PER_MTOK`, `CACHE_WRITE_USD_PER_MTOK`).
+- Helper calcula y persiste `llm_traces.cost_usd` por llamada.
+- Vistas agregadas en admin: costo por día, por conversación, top 10 conversaciones más caras.
+- **Guardrail por conversación:** si supera N tokens acumulados (configurable, default 50k), el agente cierra el turno con mensaje de cortesía y dispara `escalar_a_humano`. Evita loops infinitos costosos.
+- **Alerta diaria:** si el gasto del día supera umbral (ej. USD 20), log de nivel `warn`. Más adelante: webhook a Slack.
+
 ---
 
 ## 5. Acceptance Criteria
@@ -333,6 +361,17 @@ Cada slice es una entrega vertical funcional que se puede demostrar de punta a p
 - Documentación de runbook básico (errores comunes, cómo rotar tokens).
 
 **Demo:** stress test simulado muestra rate limit activo y métricas registradas.
+
+### Slice 8.5 — Endurecimiento LLM
+Implementación concreta de la sección **4.6 LLM Operations**.
+- Tabla `llm_traces` y wrapper que registra cada llamada a Claude (tokens, latencia, costo, tools, input/output).
+- Estructura `apps/backend/src/prompts/` con identificadores versionados (`prompt_id` + `prompt_version`).
+- Constantes de tarifa de Sonnet 4.6 y cálculo de costo por llamada.
+- Golden set inicial (10 casos) en `evals/cases.yaml` y runner `npm run eval`.
+- Vista en el panel admin: drill-down de conversación a sus traces; agregados de costo por día y top 10 conversaciones caras.
+- Guardrail: si una conversación supera el umbral de tokens, el agente escala a humano automáticamente.
+
+**Demo:** una conversación de prueba genera traces visibles en el admin con tokens, latencia y costo; `npm run eval` corre el golden set y produce reporte; al forzar una conversación a superar el umbral, el agente escala.
 
 ---
 
