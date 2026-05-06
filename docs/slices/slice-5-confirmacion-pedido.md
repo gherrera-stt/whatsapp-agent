@@ -1,5 +1,7 @@
 # Slice 5 — Confirmación y consulta de pedido
 
+> **Gates ASR.** `pre-slice-5.md` y `post-slice-5.md`. Casos mínimos: `docs/adversarial-review.md` §10.6. Invariantes a verificar: I-8 (revalidación stock+precio en TX), I-3 (lock).
+
 ## Objetivo
 Permitir que el cliente confirme un pedido en estado `borrador` (transición a `confirmado`) y consulte el estado de pedidos previos por referencia o por su número de teléfono.
 

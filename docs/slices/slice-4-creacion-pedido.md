@@ -1,5 +1,7 @@
 # Slice 4 — Creación de pedido
 
+> **Gates ASR.** `pre-slice-4.md` y `post-slice-4.md`. Casos mínimos: `docs/adversarial-review.md` §10.5. Invariantes a verificar: I-7 (rechazo por precio cambiado), I-3 (lock por conversación durante TX).
+
 ## Objetivo
 Permitir que el cliente solicite uno o más productos por chat y que el sistema cree un pedido en estado `borrador` con sus ítems y total. El agente devuelve un resumen con referencia legible.
 

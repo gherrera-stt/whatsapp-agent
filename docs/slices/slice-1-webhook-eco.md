@@ -1,5 +1,7 @@
 # Slice 1 — Webhook de WhatsApp + eco
 
+> **Gates ASR.** Antes de iniciar: `pre-slice-1.md` con casos adversariales (mínimos en `docs/adversarial-review.md` §10.2). Para cerrar: `post-slice-1.md` con verdict APROBADO o APROBADO CON DEUDA. Invariantes que **deben** verificarse: I-1, I-2, I-3, I-20.
+
 ## Objetivo
 Conectar el backend a WhatsApp Cloud API: verificación inicial, recepción segura de mensajes con validación de firma, persistencia y respuesta de eco. Primer mensaje real de WhatsApp end-to-end sin Claude todavía.
 

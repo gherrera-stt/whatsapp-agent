@@ -1,5 +1,7 @@
 # Slice 3 — Cotización (consulta de catálogo)
 
+> **Gates ASR.** `pre-slice-3.md` y `post-slice-3.md`. Casos mínimos: `docs/adversarial-review.md` §10.4. Invariantes a verificar: I-5 (datos de catálogo solo vía tool), I-6 (cache breakpoint movido a tools), I-19 (queries parametrizadas).
+
 ## Objetivo
 Permitir que el cliente pregunte por precio y disponibilidad de productos del catálogo, garantizando que los datos vienen de la base — no de alucinaciones del modelo. Se logra exponiendo a Claude el tool `consultar_producto`.
 

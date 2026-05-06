@@ -1,5 +1,7 @@
 # Slice 2 — Conversación con Claude
 
+> **Gates ASR.** `pre-slice-2.md` antes; `post-slice-2.md` para cerrar. Casos mínimos: `docs/adversarial-review.md` §10.3. Invariantes a verificar: I-4 (loadHistory filtros), I-6 (cache_control), I-15 (preview de cache_read>0).
+
 ## Objetivo
 Reemplazar el eco por una respuesta natural generada por Claude, con contexto multi-turno y prompt caching habilitado. El cliente puede saludar y conversar; el modelo recuerda el turno anterior dentro de la misma conversación.
 

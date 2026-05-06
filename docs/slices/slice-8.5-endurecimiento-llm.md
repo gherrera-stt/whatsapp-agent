@@ -1,5 +1,7 @@
 # Slice 8.5 — Endurecimiento LLM
 
+> **Gates ASR.** `pre-slice-8.5.md` y `post-slice-8.5.md`. Casos mínimos: `docs/adversarial-review.md` §10.10. Invariantes a verificar: I-14 (cada SDK call → trace), I-15 (cache hit en 2º turno), I-16 (guardrail dispara escalateToHuman), I-17 (alerta no se duplica tras restart).
+
 ## Objetivo
 Implementar la disciplina LLM Operations descrita en §4.9 de `solucion.md`: trazabilidad completa de cada llamada a Claude, control de costo, prompt versioning con runtime tracking, y golden set de evaluación. Con esto el sistema deja de ser una caja negra cuando algo falla.
 

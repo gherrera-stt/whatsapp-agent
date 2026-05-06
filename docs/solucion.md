@@ -335,6 +335,8 @@ La primera versión se considera aceptada cuando:
 
 Cada slice es una entrega vertical funcional que se puede demostrar de punta a punta.
 
+> **Gate de calidad — Adversarial System Review (ASR).** Antes y después de cada slice se ejecuta una revisión adversarial documentada en `docs/adversarial-review.md`. Sin reporte `pre-slice-N.md` archivado en `docs/reviews/` no se inicia el slice N. Sin reporte `post-slice-N.md` con verdict APROBADO o APROBADO CON DEUDA, no se inicia el slice N+1. Antes de Slice 0 se ejecuta un único `pre-flight.md` que valida construibilidad de la spec y asunciones externas.
+
 ### Slice 0 — Andamiaje
 - Monorepo, TypeScript, ESLint, Prettier, CI mínima.
 - `docker-compose` con PostgreSQL.
@@ -417,3 +419,4 @@ Implementación concreta de la sección **4.9 LLM Operations**.
 - **A. Variables de entorno.** Lista completa en `.env.example`. Globales clave: `BUSINESS_TZ` (default `America/Santiago`), `CURRENCY` (default `CLP`).
 - **B. Convenciones de prompts.** A definir en `apps/backend/src/prompts/README.md`.
 - **C. Política de PII y logs.** Implementación concreta en Slice 8 (redact con `pino`); este anexo recopila la política a medida que se vaya formalizando.
+- **D. Adversarial System Review.** Proceso de revisión crítica pre y post cada slice. Documento maestro: `docs/adversarial-review.md`. Bitácora: `docs/reviews/`.

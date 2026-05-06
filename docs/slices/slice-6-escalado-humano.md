@@ -1,5 +1,7 @@
 # Slice 6 — Escalado a humano
 
+> **Gates ASR.** `pre-slice-6.md` y `post-slice-6.md`. Casos mínimos: `docs/adversarial-review.md` §10.7. Invariantes a verificar: I-4 (handoff markers), I-9 (humano no llama Claude), I-10 (escalateToHuman idempotente).
+
 ## Objetivo
 Reconocer cuando el agente no debe seguir respondiendo (cliente lo pide explícitamente, frustración detectada, o caso fuera de scope) y entregar la conversación a un humano. La conversación queda silenciada para el agente y notificada al equipo.
 

@@ -1,5 +1,7 @@
 # Slice 7 — Panel admin (catálogo + conversaciones)
 
+> **Gates ASR.** `pre-slice-7.md` y `post-slice-7.md`. Casos mínimos: `docs/adversarial-review.md` §10.8. Invariantes a verificar: I-11 (auth required), I-12 (cookie flags por entorno).
+
 ## Objetivo
 Dar a un administrador una UI web para gestionar el catálogo (CRUD de productos) y supervisar conversaciones recientes con sus mensajes. Primer release del frontend `apps/admin`.
 

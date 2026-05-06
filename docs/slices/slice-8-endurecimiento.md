@@ -1,5 +1,7 @@
 # Slice 8 — Endurecimiento
 
+> **Gates ASR.** `pre-slice-8.md` y `post-slice-8.md`. Casos mínimos: `docs/adversarial-review.md` §10.9. Invariantes a verificar: I-13 (PII redact), GC oportunista de `rate_limit_events`.
+
 ## Objetivo
 Llevar el sistema de "funciona en demo" a "funciona bajo condiciones adversas": rate limiting, métricas operativas básicas, runbook y suite de evaluación inicial. Es el endurecimiento operacional general; el específico de LLM es Slice 8.5.
 

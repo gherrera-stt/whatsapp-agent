@@ -1,5 +1,7 @@
 # Slice 0 — Andamiaje
 
+> **Gates ASR.** Antes de iniciar: `docs/reviews/pre-flight.md` cerrado con Go + `docs/reviews/pre-slice-0.md` con casos adversariales declarados. Para cerrar: `docs/reviews/post-slice-0.md` con verdict APROBADO. Ver `docs/adversarial-review.md` §10.1 para los casos mínimos.
+
 ## Objetivo
 Repositorio listo para iterar: monorepo TypeScript con CI mínima, base de datos local con catálogo cargado y endpoint de salud. Cimiento sobre el que se apoyan todos los slices siguientes.
 
