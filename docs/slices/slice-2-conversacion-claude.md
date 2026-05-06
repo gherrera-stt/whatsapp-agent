@@ -10,12 +10,14 @@ Reemplazar el eco por una respuesta natural generada por Claude, con contexto mu
 
 ## Alcance
 **Incluye:**
-- Servicio `claude` con SDK oficial `@anthropic-ai/sdk`
+- Servicio `claude` con SDK oficial `@anthropic-ai/sdk` (versión pinneada en `package.json`)
 - System prompt versionado (`system.sales.v1`) en módulo TS
 - Construcción de contexto: últimos N mensajes de la conversación + system prompt
-- **Prompt caching** del system prompt (cache breakpoint en el bloque de system)
+- **Prompt caching** del system prompt (cache breakpoint al final del bloque de system; nota: en Slice 3 al introducir tools, el breakpoint se mueve al final del bloque de tools porque el prefijo cacheable de Anthropic es `system + tools`)
 - Reemplazo del eco por la respuesta del modelo
 - Persistencia de respuesta en `messages` con `direccion='out'`
+- **`loadHistory` filtra `tipo='system'`** desde el inicio (los marcadores que se introducen en Slice 6 — `[ESCALADO]`, `[REACTIVADA]`, `[HUMAN HANDOFF]` — no van al modelo).
+- El runner usa el lock por conversación introducido en Slice 1 (`withConversationLock(phone, ...)`), de modo que historial → llamada a Claude → persistencia se ejecutan serialmente para un mismo cliente.
 
 **No incluye:** tools (Slice 3+), eval pipeline (Slice 8.5), traces estructurados (Slice 8.5; aquí solo log básico).
 
@@ -64,11 +66,13 @@ async function respond(args: {
 ```
 
 ### Construcción de contexto
-1. Cargar últimos `HISTORY_TURNS` mensajes (in + out, sin marcadores `system`) ordenados ascendente.
+1. Cargar últimos `HISTORY_TURNS` mensajes ordenados ascendente, **excluyendo `tipo='system'`** (marcadores internos) y `tipo='media'` (no aportan contenido textual al modelo).
 2. Mapear a `messages: [{role: 'user'|'assistant', content}]`.
 3. Añadir el `userMessage` actual al final como `role:'user'`.
-4. `system` viene del prompt builder con `cache_control: ephemeral`.
+4. `system` viene del prompt builder con `cache_control: { type: 'ephemeral' }`. **En este slice no hay tools**; el cache cubre sólo `system`.
 5. Llamar `client.messages.create({ model, system, messages, max_tokens, temperature })`.
+
+> **Sobre tool_use en historial.** El historial enviado a Claude en este slice es texto plano (`{role, content: string}`). Cuando se incorporen tools (Slice 3+), las llamadas previas a `consultar_producto`/`crear_pedido` no se inyectan reconstruidas en `messages`; el modelo se apoya en el texto saliente que él mismo redactó. Para acciones que requieren reabrir contexto fuerte (p. ej. confirmar el último borrador), Slice 5 resuelve la referencia en backend en lugar de depender de la memoria del modelo. Documentado como decisión consciente.
 
 ### Integración en el flujo del webhook
 - Donde antes se hacía eco, ahora:
@@ -110,6 +114,8 @@ Por ahora `pino.info` con `{conversationId, promptId, promptVersion, inputTokens
 - [ ] Si `ANTHROPIC_API_KEY` es inválida: respuesta de fallback al cliente y log `error`.
 - [ ] Si Claude tarda > 15 s: timeout y respuesta de fallback.
 - [ ] El system prompt rechaza temas fuera de comercio (smoke test).
+- [ ] `loadHistory` excluye `tipo='system'` y `tipo='media'` (test unitario).
+- [ ] Latencia P95 < 4 s con cache caliente; sin cache (primer turno) puede ser hasta 6 s — aceptado por el SLO de §4.5.
 
 ## Tests requeridos
 - **Unit:** `loadHistory` (orden, límite, filtros). Builder del prompt (estructura, presencia de `cache_control`).
@@ -132,7 +138,8 @@ psql "$DATABASE_URL" -c "
 ```
 
 ## Riesgos del slice
-- **Costo descontrolado por falta de cache:** verificar manualmente `cache_read_tokens` en el primer test; si es 0 después del segundo turno, el cache no está bien configurado.
-- **Latencia > 4 s sin streaming:** v1 sin streaming; si latencia molesta, considerar enviar mensaje "escribiendo…" antes (no en este slice).
+- **Costo descontrolado por falta de cache:** verificar manualmente `cache_read_tokens` en el segundo turno; si es 0, el cache no está bien configurado. Si en Slice 3 se introducen tools y vuelve a 0, mover el `cache_control` al final del bloque `tools`.
+- **Latencia > 4 s sin streaming:** v1 sin streaming; si latencia molesta, considerar enviar mensaje "escribiendo…" antes (no en este slice). SLO documentado en §4.5 reconoce que turnos con tools llegan a 6–8 s.
 - **Inyección de prompt vía mensaje del cliente:** el system prompt debe instruir al modelo a ignorar instrucciones del usuario que pidan cambiar comportamiento; reforzar en versiones siguientes.
 - **Historial truncado mal calculado pierde contexto importante:** validar visualmente en demo.
+- **Tool_use no presente en historial:** decisión documentada arriba; si en producción aparecen casos de "el modelo olvida algo importante de un turno anterior", evaluar reconstruir bloques `tool_use`/`tool_result` desde `llm_traces` (Slice 8.5).

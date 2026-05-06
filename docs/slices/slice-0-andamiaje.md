@@ -5,8 +5,9 @@ Repositorio listo para iterar: monorepo TypeScript con CI mínima, base de datos
 
 ## Dependencias
 - Node.js ≥ 20 LTS, Docker, npm o pnpm
+- `dbmate` instalado localmente (binario o `npx dbmate`)
 - Cuenta GitHub (repo creado)
-- Variables nuevas: `DATABASE_URL`, `PORT`, `NODE_ENV`, `LOG_LEVEL`
+- Variables nuevas: `DATABASE_URL`, `PORT`, `NODE_ENV`, `LOG_LEVEL`, `BUSINESS_TZ` (default `America/Santiago`), `CURRENCY` (default `CLP`)
 
 ## Alcance
 **Incluye:**
@@ -14,7 +15,7 @@ Repositorio listo para iterar: monorepo TypeScript con CI mínima, base de datos
 - TypeScript en modo `strict` en todos los workspaces
 - ESLint + Prettier compartidos, pre-commit con `husky` + `lint-staged`
 - `docker-compose.yml` con PostgreSQL 16
-- Migration runner (`node-pg-migrate`) y migración 0001 con tabla `products`
+- Migration runner **`dbmate`** (SQL puro, naming por timestamp `YYYYMMDDHHMMSS_descripcion.sql`); migración inicial con tabla `products`
 - Seed de catálogo (≥ 10 productos de muestra)
 - Endpoint `GET /health` → `{status, db, version}`
 - Logger `pino` estructurado con `requestId`
@@ -34,7 +35,7 @@ whatsapp-agent/
 ├── packages/shared/             # tipos zod compartidos (vacío inicial)
 ├── infra/
 │   ├── docker-compose.yml
-│   ├── migrations/0001_products.sql
+│   ├── migrations/20260506000000_products.sql       # naming dbmate (timestamp)
 │   └── seeds/products.sql
 ├── .github/workflows/ci.yml
 ├── .env.example
@@ -44,6 +45,7 @@ whatsapp-agent/
 
 ### Modelo de datos (delta)
 ```sql
+-- migrate:up
 CREATE TABLE products (
   id           BIGSERIAL PRIMARY KEY,
   sku          TEXT UNIQUE NOT NULL,
@@ -57,7 +59,12 @@ CREATE TABLE products (
 );
 CREATE INDEX idx_products_nombre_lower ON products (LOWER(nombre));
 CREATE INDEX idx_products_activo ON products (activo) WHERE activo = TRUE;
+
+-- migrate:down
+DROP TABLE products;
 ```
+
+> **Idempotencia.** `dbmate` lleva su propia tabla `schema_migrations` y nunca corre dos veces el mismo archivo. No es necesario `CREATE TABLE IF NOT EXISTS` en el SQL — la idempotencia está garantizada por el runner. Si un dev necesita re-bootear desde cero, `dbmate drop && dbmate up`.
 
 ### Endpoint `/health`
 - Hace `SELECT 1` contra Postgres con timeout de 1 s.
@@ -74,7 +81,7 @@ CREATE INDEX idx_products_activo ON products (activo) WHERE activo = TRUE;
 7. `npm run build --workspaces`
 
 ### Configuración con zod
-`apps/backend/src/config.ts` valida env al boot y aborta si falta algo. Sin `process.env` directo en el resto del código.
+`apps/backend/src/config.ts` valida env al boot y aborta si falta algo. Sin `process.env` directo en el resto del código. Incluye `BUSINESS_TZ` (zona horaria de presentación, validada con `Intl.DateTimeFormat`) y `CURRENCY` (código ISO 4217).
 
 ## Archivos a crear / modificar
 - `package.json` (root, con `workspaces` y scripts)
@@ -87,8 +94,9 @@ CREATE INDEX idx_products_activo ON products (activo) WHERE activo = TRUE;
 - `apps/backend/src/db/client.ts`
 - `apps/backend/src/logger.ts`
 - `infra/docker-compose.yml`
-- `infra/migrations/0001_products.sql`
+- `infra/migrations/<timestamp>_products.sql`
 - `infra/seeds/products.sql`
+- `apps/backend/src/lib/format.ts` (formateadores con `BUSINESS_TZ` y `CURRENCY`)
 - `.github/workflows/ci.yml`
 - `.env.example`
 - `.nvmrc` (`20`)
@@ -97,7 +105,7 @@ CREATE INDEX idx_products_activo ON products (activo) WHERE activo = TRUE;
 ## Criterios de aceptación
 - [ ] `docker compose -f infra/docker-compose.yml up -d` levanta Postgres en `localhost:5432`.
 - [ ] `npm install` sin errores.
-- [ ] `npm run db:migrate` aplica la migración 0001 idempotentemente (segunda corrida no falla).
+- [ ] `npm run db:migrate` (alias de `dbmate up`) aplica la migración inicial; segunda corrida es no-op (`dbmate` registra en `schema_migrations`).
 - [ ] `npm run db:seed` carga ≥ 10 productos.
 - [ ] `npm run dev --workspace=apps/backend` levanta servidor en `:3000`.
 - [ ] `curl localhost:3000/health` → 200 con `{status:"ok", db:"ok"}`.
@@ -128,5 +136,5 @@ Esperado: `/health` 200 con db ok, conteo ≥ 10.
 
 ## Riesgos del slice
 - **Versiones de Node divergentes entre devs:** fijar `engines` en `package.json` y `.nvmrc`.
-- **Migration runner sin soporte real para SQL puro:** validar `node-pg-migrate` antes de comprometernos; alternativa: `dbmate`.
 - **Workspaces mal configurados rompen builds más adelante:** correr `npm run build --workspaces` desde el inicio.
+- **Conflicto de naming de migraciones cuando dos devs trabajan en paralelo:** el timestamp de `dbmate` minimiza el riesgo; documentar en `infra/migrations/README.md` que el archivo se nombra al momento de crear el PR (no al iniciar la rama) si dos personas crean migraciones en la misma jornada.

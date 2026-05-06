@@ -1,7 +1,7 @@
 # Definición de la Solución — Agente Inteligente para WhatsApp
 
-> Documento de definición del producto. Versión inicial.
-> Última actualización: 2026-05-05
+> Documento de definición del producto.
+> Última actualización: 2026-05-06
 
 ---
 
@@ -66,7 +66,7 @@ whatsapp-agent/
 **Decisiones clave:**
 - Monorepo con workspaces (npm o pnpm) para compartir tipos entre backend y admin.
 - TypeScript en todo el código aplicativo.
-- Migraciones SQL versionadas en `infra/migrations`, ejecutadas por un runner ligero (p. ej. `node-pg-migrate`).
+- Migraciones SQL versionadas en `infra/migrations`, ejecutadas por **`dbmate`** (SQL puro, idempotente vía tabla de tracking propia, naming por timestamp). Decisión final tomada para evitar la indefinición que arrastraba `node-pg-migrate` cuando se usan archivos `.sql` puros.
 
 ### 2.2 Flujo de desarrollo local — Backend
 
@@ -204,9 +204,11 @@ Meta Cloud API ──webhook POST──▶ Backend Express
 ### 4.3 Integración con Claude
 
 - Modelo: **`claude-sonnet-4-6`** como motor único de conversación, comprensión de intención y generación de respuestas en todas las etapas (no se introduce un segundo modelo para clasificación en v1).
-- **Prompt caching** para el system prompt + catálogo, dado que se repite en cada turno.
-- **Tool use** para acciones estructuradas: `consultar_producto`, `crear_pedido`, `consultar_pedido`, `escalar_a_humano`.
+- **Prompt caching** para el prefijo cacheable de cada llamada. **Importante:** en la API de Anthropic el prefijo cacheable es `system + tools` (en ese orden). Cuando se introducen tools (Slice 3), el `cache_control` debe colocarse al final del bloque de `tools`, no en el `system`, para que el cache cubra ambos. Si se modifica cualquier definición de tool, el cache se invalida — versionar el conjunto de tools junto con el system prompt.
+- **Tool use** para acciones estructuradas: `consultar_producto`, `crear_pedido`, `consultar_pedido`, `confirmar_pedido`, `cancelar_pedido`, `escalar_a_humano`.
+- Soporte de **bloques `tool_use` en paralelo** en una sola respuesta (Claude puede emitir varios). El runner los ejecuta concurrentemente y devuelve un único bloque `tool_result` por id.
 - Temperatura baja (0.2–0.4) para consistencia comercial.
+- Versión del SDK `@anthropic-ai/sdk` pinneada (`~0.x.y`) en `package.json`.
 
 ### 4.4 Integración con WhatsApp Cloud API
 
@@ -218,12 +220,42 @@ Meta Cloud API ──webhook POST──▶ Backend Express
 ### 4.5 Restricciones y consideraciones
 
 - Ventana de servicio al cliente de 24 h impuesta por Meta para mensajes libres.
-- Latencia objetivo de respuesta del agente: **< 4 s P95** end-to-end.
-- Persistencia obligatoria de cada mensaje entrante antes de responder, para no perder trazabilidad ante fallos.
+- **Latencia objetivo (P95 end-to-end) por tipo de turno:**
+  - Saludo / charla sin tools: **< 4 s** (cache caliente).
+  - Cotización con 1 tool call: **< 6 s**.
+  - Pedido (consultar + crear con confirmación): **< 8 s**.
+  Estos SLO son sin streaming; si los superamos consistentemente en producción, evaluar streaming + mensaje intermedio "procesando…".
+- **Persistencia obligatoria del mensaje entrante antes de hacer ack 200 a Meta**, para no perder trazabilidad si el proceso muere entre el ack y el procesamiento (ver §4.8).
 
-### 4.6 LLM Operations
+### 4.6 Concurrencia y consistencia conversacional
 
-Disciplina operativa para que el componente LLM sea construible, depurable y controlable en costo. Implementación concreta en **Slice 8.5 — Endurecimiento LLM**.
+WhatsApp permite que un cliente envíe varios mensajes en ráfaga (3 mensajes en 2 s es común). Express los procesa en paralelo. Sin protección, tres handlers cargan el mismo "historial reciente" estancado, hacen tres llamadas a Claude y producen 2–3 respuestas que se solapan, además de eventuales pedidos duplicados.
+
+**Modelo de serialización por conversación:**
+- Antes de "cargar historial → llamar a Claude → persistir respuesta", cada handler toma un **`pg_advisory_xact_lock(hashtext(phone))`** dentro de una transacción.
+- Alternativa más liviana en MVP local: **cola in-process por `phone`** (Map\<phone, Promise\>) que serializa los turnos.
+- El lock libera al final de la transacción, no antes. Las respuestas a un mismo cliente quedan en orden de llegada, sin solapes.
+- Trade-off: si un turno queda colgado en Claude (>15 s), bloquea el siguiente; el timeout de Claude (15 s) y el fallback acotan el daño.
+
+### 4.7 Durabilidad de mensajes (outbox)
+
+Meta exige ack 200 en menos de 5 s y reintenta sólo si no recibe ack. Si nuestro servidor responde 200 y crashea antes de persistir, el mensaje se pierde silenciosamente.
+
+**Regla:** el mensaje entrante se persiste en `messages` (TX corta, < 200 ms) **antes** del ack 200. El procesamiento (llamar a Claude, enviar respuesta) ocurre asíncronamente *después* del ack. Si el proceso muere tras el ack pero antes de responder, al reiniciarse un sweeper detecta mensajes `in` sin `out` posterior y los re-procesa (idempotente por `whatsapp_msg_id` y por estado de conversación).
+
+Implementación mínima:
+- INSERT del entrante con `whatsapp_msg_id UNIQUE` + `ON CONFLICT DO NOTHING RETURNING id` ⇒ idempotente ante reintentos de Meta.
+- El procesamiento posterior se publica a una "cola" (in-process en MVP, vía `setImmediate`) tras el commit del INSERT.
+- Sweeper opcional al boot: re-encolar mensajes entrantes recientes (últimos 10 min) sin respuesta saliente.
+
+### 4.8 Moneda y zona horaria
+
+- **Moneda:** se manejan precios en una sola moneda configurable vía `CURRENCY` (default `CLP`). El formato de presentación (separadores de miles, símbolo) deriva de la moneda. Multi-currency queda fuera de v1.
+- **Zona horaria:** `BUSINESS_TZ` (default `America/Santiago`) controla todo lo que el cliente ve con fecha (referencias `ORD-YYYYMMDD-...`, mensajes con horas). El servidor opera en UTC; sólo la presentación se convierte.
+
+### 4.9 LLM Operations
+
+Disciplina operativa para que el componente LLM sea construible, depurable y controlable en costo. Implementación concreta en **Slice 8.5 — Endurecimiento LLM** y referencia secundaria en §4.3.
 
 **Prompt versioning**
 - Cada prompt vive en `apps/backend/src/prompts/` como módulo TypeScript exportando una función pura que recibe el contexto y devuelve los `messages`/`system` a enviar a Claude.
@@ -282,6 +314,11 @@ La primera versión se considera aceptada cuando:
 | Cambios incompatibles en WhatsApp Cloud API | Refactor inesperado | Adaptador delgado en `services/whatsapp`; pinear versión en URL |
 | Datos sensibles del cliente en logs | Riesgo legal/privacidad | Redacción de PII en logger; no persistir más de lo necesario |
 | Spam o abuso desde números desconocidos | Costo y ruido | Rate limiting por `phone`; lista de bloqueo |
+| Mensajes en ráfaga producen respuestas solapadas o pedidos duplicados | Pérdida de confianza, doble cobro | Lock por conversación (§4.6) antes de cargar historial / llamar a Claude |
+| Crash entre ack 200 y procesamiento pierde el mensaje | Cliente no recibe respuesta y queda fuera de trazabilidad | Persistir entrante antes del ack (§4.7) + sweeper opcional al boot |
+| Precio cambia entre cotización y creación de pedido | Cliente reclama por precio diferente | `precio_unitario_esperado` en `crear_pedido`; rechazar si difiere |
+| Stock se vende dos veces entre borrador y confirmación | Faltante físico, reclamos | Revalidar stock al confirmar (Slice 5); aceptar overselling explícito si se decide |
+| Tarifas de Anthropic hardcodeadas se desactualizan | Cálculo de costo erróneo | Revisión trimestral en runbook; alerta si `cache_read` es 0 cuando debería ser positivo |
 
 ### 6.2 Supuestos
 
@@ -363,7 +400,7 @@ Cada slice es una entrega vertical funcional que se puede demostrar de punta a p
 **Demo:** stress test simulado muestra rate limit activo y métricas registradas.
 
 ### Slice 8.5 — Endurecimiento LLM
-Implementación concreta de la sección **4.6 LLM Operations**.
+Implementación concreta de la sección **4.9 LLM Operations**.
 - Tabla `llm_traces` y wrapper que registra cada llamada a Claude (tokens, latencia, costo, tools, input/output).
 - Estructura `apps/backend/src/prompts/` con identificadores versionados (`prompt_id` + `prompt_version`).
 - Constantes de tarifa de Sonnet 4.6 y cálculo de costo por llamada.
@@ -377,6 +414,6 @@ Implementación concreta de la sección **4.6 LLM Operations**.
 
 ## Anexos
 
-- **A. Variables de entorno.** Lista completa en `.env.example`.
+- **A. Variables de entorno.** Lista completa en `.env.example`. Globales clave: `BUSINESS_TZ` (default `America/Santiago`), `CURRENCY` (default `CLP`).
 - **B. Convenciones de prompts.** A definir en `apps/backend/src/prompts/README.md`.
-- **C. Política de PII y logs.** A definir junto con seguridad antes de producción.
+- **C. Política de PII y logs.** Implementación concreta en Slice 8 (redact con `pino`); este anexo recopila la política a medida que se vaya formalizando.

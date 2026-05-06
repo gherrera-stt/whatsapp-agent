@@ -1,7 +1,7 @@
 # Slice 8.5 — Endurecimiento LLM
 
 ## Objetivo
-Implementar la disciplina LLM Operations descrita en §4.6 de `solucion.md`: trazabilidad completa de cada llamada a Claude, control de costo, prompt versioning con runtime tracking, y golden set de evaluación. Con esto el sistema deja de ser una caja negra cuando algo falla.
+Implementar la disciplina LLM Operations descrita en §4.9 de `solucion.md`: trazabilidad completa de cada llamada a Claude, control de costo, prompt versioning con runtime tracking, y golden set de evaluación. Con esto el sistema deja de ser una caja negra cuando algo falla.
 
 ## Dependencias
 - Slice 8 completo (estructura de evals existe)
@@ -30,7 +30,7 @@ CREATE TABLE llm_traces (
   id                       BIGSERIAL PRIMARY KEY,
   conversation_id          BIGINT REFERENCES conversations(id),
   message_id               BIGINT REFERENCES messages(id),
-  turn_index               INT NOT NULL,
+  call_index               INT NOT NULL,                  -- ordinal de la llamada al SDK dentro del turno (no del turno)
   prompt_id                TEXT NOT NULL,
   prompt_version           INT NOT NULL,
   model                    TEXT NOT NULL,
@@ -50,7 +50,16 @@ CREATE TABLE llm_traces (
 CREATE INDEX idx_llm_traces_conv ON llm_traces (conversation_id, created_at);
 CREATE INDEX idx_llm_traces_created ON llm_traces (created_at);
 CREATE INDEX idx_llm_traces_prompt ON llm_traces (prompt_id, prompt_version);
+
+-- Tabla 1-fila para deduplicación de la alerta diaria de costo (sobrevive restarts)
+CREATE TABLE llm_cost_alert_state (
+  id            INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  last_alert_on DATE
+);
+INSERT INTO llm_cost_alert_state (id, last_alert_on) VALUES (1, NULL) ON CONFLICT DO NOTHING;
 ```
+
+> **Naming `call_index` (antes `turn_index`).** Cada llamada al SDK genera una fila en `llm_traces`. Un único turno conversacional con tool use puede generar 2–4 filas (call_index 0..N). El "turno" del cliente se identifica por `message_id`. Renombrar evita confusión.
 
 ### Constantes de tarifa (`apps/backend/src/services/claude/pricing.ts`)
 ```ts
@@ -77,7 +86,7 @@ export function costUsd(model: keyof typeof PRICING, usage): number { /* ... */ 
 Reemplaza llamadas directas al SDK. Recibe:
 ```ts
 {
-  conversationId, messageId, turnIndex,
+  conversationId, messageId, callIndex,
   promptId, promptVersion,
   model, system, messages, tools, max_tokens, temperature,
 }
@@ -85,9 +94,11 @@ Reemplaza llamadas directas al SDK. Recibe:
 Hace:
 1. `t0 = performance.now()`.
 2. `client.messages.create(...)`.
-3. Calcula `latency_ms`, `cost_usd`, extrae `tools_called` del bloque de respuesta.
+3. Calcula `latency_ms`, `cost_usd`, extrae `tools_called` del bloque de respuesta (puede haber múltiples bloques `tool_use` paralelos — todos se serializan).
 4. INSERT en `llm_traces` con `outcome='ok'`.
 5. Si error/timeout: INSERT con `outcome='error'|'timeout'` y `error_detail`.
+
+El `respond()` mantiene un contador local `callIndex` que arranca en 0 y aumenta en cada iteración del tool loop; se persiste en `llm_traces.call_index`.
 
 ### Prompts versionados — registry
 ```ts
@@ -107,22 +118,31 @@ export const ACTIVE = 'system.sales.v5';
 ```
 El wrapper toma el `promptId` y `promptVersion` desde el registry activo (no de strings sueltas).
 
+> **Por qué se mantienen versiones inactivas en `REGISTRY`.** Sólo `ACTIVE` se usa para llamadas nuevas al modelo, pero `llm_traces` referencia versiones históricas vía `prompt_id + prompt_version`. Mantenerlas en el registry permite re-cargar el prompt exacto que se usó para reproducir traces antiguos en el admin (drill-down) o para correr eval comparativa entre versiones. Si una versión deja de servirse hace > 6 meses y no aparece en el `llm_traces` reciente, se puede archivar.
+
 ### Guardrail de tokens por conversación
 Antes de llamar a Claude:
 ```sql
-SELECT COALESCE(SUM(input_tokens + output_tokens), 0) AS total
+SELECT COALESCE(SUM(
+  -- excluimos cache_read_tokens porque cuestan 10× menos y no queremos
+  -- castigar a una conversación larga que se beneficia bien del cache
+  input_tokens - cache_read_tokens + output_tokens
+), 0) AS total
 FROM llm_traces WHERE conversation_id = $1
   AND created_at > NOW() - INTERVAL '24 hours';
 ```
 Si `total > CONVERSATION_TOKEN_BUDGET`:
 - No llama a Claude.
-- Marca conversación con `escalar_a_humano` (motivo `fuera_de_scope`, detalle `excedió presupuesto de tokens`).
+- **Llama a `escalateToHuman({source:'guardrail', motivo:'fuera_de_scope', detalle:'excedió presupuesto de tokens'})`** — la función pura compartida con el tool (Slice 6).
 - Envía mensaje "Esta conversación se ha vuelto compleja, te conectaré con una persona".
 
+> **Por qué excluir `cache_read_tokens`:** los tokens leídos del cache cuestan 10× menos que los normales. Si los contáramos al peso, una conversación que aprovecha bien el cache se vería penalizada injustamente vs una corta sin cache. Si en producción aparece abuso (cliente intenta agotar contexto rápido), se puede pasar a una métrica ponderada por costo en lugar de tokens.
+
 ### Alerta diaria de costo
-- Job in-process al recibir mensaje (lazy): si nunca se evaluó hoy, calcular gasto del día. Si supera umbral: log `warn` `{event:'llm_cost.threshold_exceeded', day, total_usd, threshold}`.
-- Marca interna `last_alert_date` para no spamear (puede ser una tabla 1-fila o variable en memoria con persistencia mínima).
-- Cálculo: `SELECT SUM(cost_usd) FROM llm_traces WHERE created_at::date = CURRENT_DATE`.
+- Job in-process al recibir mensaje (lazy): si `last_alert_on` < `CURRENT_DATE`, calcular gasto del día.
+- Si supera umbral: log `warn` `{event:'llm_cost.threshold_exceeded', day, total_usd, threshold}` y `UPDATE llm_cost_alert_state SET last_alert_on = CURRENT_DATE`.
+- **Persistencia en tabla 1-fila (`llm_cost_alert_state`)** en lugar de variable en memoria: sobrevive a restarts del proceso, evitando re-disparar la alerta el mismo día tras un deploy.
+- Cálculo: `SELECT SUM(cost_usd) FROM llm_traces WHERE created_at::date = (NOW() AT TIME ZONE current_setting('app.business_tz'))::date` — con `BUSINESS_TZ` para que "el día" coincida con el día comercial del cliente.
 
 ### Vistas en admin
 Páginas/secciones nuevas:
@@ -152,13 +172,13 @@ Páginas/secciones nuevas:
 - Baseline en `evals/baseline.json` (commiteado); `npm run eval -- --update-baseline` lo refresca.
 
 ## Archivos a crear / modificar
-- `infra/migrations/0007_llm_traces.sql`
+- `infra/migrations/<timestamp>_llm_traces.sql` (incluye `llm_cost_alert_state`)
 - `apps/backend/src/services/claude/pricing.ts`
 - `apps/backend/src/services/claude/callTracked.ts`
-- `apps/backend/src/services/claude/respond.ts` (refactor: usa `callTracked`)
+- `apps/backend/src/services/claude/respond.ts` (refactor: usa `callTracked`, mantiene `callIndex`)
 - `apps/backend/src/services/llm/traces.ts` (insert + queries agregadas)
-- `apps/backend/src/services/llm/budgetGuardrail.ts`
-- `apps/backend/src/services/llm/costAlert.ts`
+- `apps/backend/src/services/llm/budgetGuardrail.ts` (llama a `escalateToHuman` compartida)
+- `apps/backend/src/services/llm/costAlert.ts` (lee/escribe `llm_cost_alert_state`)
 - `apps/backend/src/prompts/index.ts` (registry tipado)
 - `apps/backend/src/routes/admin/llm.ts`
 - `apps/admin/src/pages/LLMCost.tsx`
@@ -168,20 +188,22 @@ Páginas/secciones nuevas:
 - `evals/baseline.json`
 - `apps/backend/tests/claude.callTracked.test.ts`
 - `apps/backend/tests/budgetGuardrail.test.ts`
+- `apps/backend/tests/llm.costAlert.persistence.test.ts` (verifica que tras restart no se re-dispara el mismo día)
 
 ## Criterios de aceptación
-- [ ] Cada llamada a Claude inserta una fila en `llm_traces` con tokens, latencia y costo correctos.
+- [ ] Cada llamada a Claude inserta una fila en `llm_traces` con tokens, latencia y costo correctos. `call_index` ordinal correcto dentro del turno.
 - [ ] `cost_usd` calculado coincide con tarifas vigentes (verificar con caso conocido).
-- [ ] Una conversación de 3 turnos genera ≥ 3 filas en `llm_traces` (más si hubo tool use).
+- [ ] Una conversación de 3 turnos genera ≥ 3 filas en `llm_traces` (más si hubo tool use; las llamadas paralelas con N tool_use se serializan en filas distintas con `call_index` consecutivo).
 - [ ] El admin muestra los traces de una conversación con drill-down a input/output completos.
 - [ ] La página `/llm/cost` muestra costo del día actual y top 10 conversaciones más caras.
-- [ ] Conversación que excede `CONVERSATION_TOKEN_BUDGET` se escala automáticamente a humano sin llamar a Claude.
-- [ ] Cuando el gasto diario supera umbral, aparece log `warn` con `event:llm_cost.threshold_exceeded`. No se duplica el mismo día.
-- [ ] `prompt_id` y `prompt_version` registrados en cada trace coinciden con el registry activo.
+- [ ] **Conversación que excede `CONVERSATION_TOKEN_BUDGET` (excluyendo `cache_read_tokens`) se escala automáticamente a humano sin llamar a Claude, vía la función pura `escalateToHuman` con `source='guardrail'`.**
+- [ ] Cuando el gasto diario supera umbral, aparece log `warn` con `event:llm_cost.threshold_exceeded`.
+- [ ] **Restart del proceso el mismo día NO re-dispara la alerta** (test con `llm_cost_alert_state`).
+- [ ] `prompt_id` y `prompt_version` registrados en cada trace coinciden con el registry activo. Versiones inactivas siguen en `REGISTRY` para replay.
 - [ ] `npm run eval` corre los 30 casos del golden set, invoca al judge en los que aplica y produce reporte HTML.
 - [ ] `npm run eval` falla (exit 1) si baseline regresiona en > 2 casos.
 - [ ] Cambiar el system prompt de v4 a v5 y re-correr eval muestra diff con casos afectados.
-- [ ] El segundo turno de una conversación reporta `cache_read_tokens > 0` (cache caliente).
+- [ ] El segundo turno de una conversación reporta `cache_read_tokens > 0` (cache caliente sobre `system + tools`).
 
 ## Tests requeridos
 - **Unit:** `costUsd` con casos conocidos (input only, input+output, con cache reads).
@@ -221,5 +243,6 @@ open evals/reports/$(ls -t evals/reports/ | head -1)
 - **Tarifas hardcodeadas se desactualizan:** documentar revisión trimestral en runbook; alternativa futura: leer de un endpoint o config externa.
 - **`input` y `output` jsonb crecen el tamaño de la DB rápido:** considerar política de retención (ej. truncar `input`/`output` a 10 KB y guardar resto en object storage cuando se justifique).
 - **LLM-as-judge no es determinista:** usar temperature 0 en el judge; aceptar variabilidad y revisar resultados manualmente para casos críticos.
-- **Guardrail demasiado agresivo escala conversaciones legítimas largas:** ajustar `CONVERSATION_TOKEN_BUDGET` con datos reales tras 1–2 semanas.
+- **Guardrail demasiado agresivo escala conversaciones legítimas largas:** mitigado al excluir `cache_read_tokens` del cómputo; ajustar `CONVERSATION_TOKEN_BUDGET` con datos reales tras 1–2 semanas.
 - **Costo del eval pipeline contra Claude real:** golden set de 30 con un par de turnos cada uno corre ~$0.20–$0.50 por ejecución; aceptable para uso manual pre-merge.
+- **`call_index` mal incrementado en tool loop:** test que verifica que los traces de un turno tienen `call_index` consecutivo desde 0.
